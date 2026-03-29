@@ -1,0 +1,9 @@
+[
+  {
+    "from": "EWR",
+    "to": "LAS",
+    "date": "2026-05-23",
+    "return_date": "2026-05-26",
+    "target_price": 400
+  }
+]
