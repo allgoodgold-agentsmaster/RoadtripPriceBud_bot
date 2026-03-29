@@ -1,6 +1,7 @@
 import os
 import json
 import requests
+from datetime import date
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_IDS = [
@@ -8,6 +9,8 @@ CHAT_IDS = [
     os.environ["TELEGRAM_CHAT_ID_VICTORIA"],
 ]
 SERPAPI_KEY = os.environ["SERPAPI_KEY"]
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+HISTORY_FILE = "price_history.json"
 
 def send_message(text):
     for chat_id in CHAT_IDS:
@@ -15,6 +18,17 @@ def send_message(text):
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
         )
+
+def load_history():
+    try:
+        with open(HISTORY_FILE) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_history(history):
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=2)
 
 def check_flight(route):
     params = {
@@ -45,9 +59,53 @@ def check_flight(route):
     except (KeyError, IndexError):
         return None, None, None, None
 
+def ask_claude(route, price, airline, hours, mins, history):
+    route_key = f"{route['from']}-{route['to']}-{route['date']}"
+    past = history.get(route_key, [])
+
+    history_text = ""
+    if past:
+        history_text = "Price history (oldest to newest):\n"
+        for entry in past[-14:]:  # last 14 days max
+            history_text += f"  {entry['date']}: ${entry['price']}\n"
+    else:
+        history_text = "No price history yet — this is the first check."
+
+    prompt = f"""You are a friendly, smart flight price assistant helping a couple — Oleksandr and Victoria — decide when to book flights.
+
+Route: {route['from']} → {route['to']}
+Travel dates: {route['date']}{f" to {route['return_date']}" if route.get('return_date') else ' (one-way)'}
+Target price per person: ${route.get('target_price', 'not set')}
+Today's price: ${price} ({airline}, {hours}h {mins}m)
+Today's date: {date.today()}
+
+{history_text}
+
+Based on the price trend, days until travel, and any patterns you notice, write a short warm message (3-5 sentences max) to Oleksandr and Victoria. Be conversational, not robotic. Give them a concrete recommendation — should they book now, wait, or keep watching? If the trend is clearly going down, say so. If it spiked, warn them. Use simple emojis sparingly. Do not use markdown headers or bullet points — just natural flowing text."""
+
+    response = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 300,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    )
+
+    data = response.json()
+    return data["content"][0]["text"]
+
 def main():
     with open("routes.json") as f:
         routes = json.load(f)
+
+    history = load_history()
+    today = str(date.today())
 
     for route in routes:
         price, airline, hours, mins = check_flight(route)
@@ -56,33 +114,34 @@ def main():
             send_message(f"⚠️ Could not fetch price for {route['from']} → {route['to']}. Will try again tomorrow.")
             continue
 
-        target = route.get("target_price")
+        # Save today's price to history
+        route_key = f"{route['from']}-{route['to']}-{route['date']}"
+        if route_key not in history:
+            history[route_key] = []
+        
+        # Avoid duplicate entries for the same day
+        if not history[route_key] or history[route_key][-1]["date"] != today:
+            history[route_key].append({"date": today, "price": price})
+
+        # Ask Claude to reason about it
+        message = ask_claude(route, price, airline, hours, mins, history)
+
         trip = f"{route['from']} → {route['to']}"
         dates = route['date']
         if route.get("return_date"):
             dates += f" – {route['return_date']}"
 
-        if target and price <= target:
-            msg = (
-                f"✅ *Price alert, Oleksandr & Victoria!*\n\n"
-                f"✈️ {trip}\n"
-                f"📅 {dates}\n"
-                f"💰 *${price}* per person — below your ${target} target!\n"
-                f"🛫 {airline} · {hours}h {mins}m\n\n"
-                f"Might be a good time to book! 🎉"
-            )
-        else:
-            msg = (
-                f"📊 *Daily flight update*\n\n"
-                f"✈️ {trip}\n"
-                f"📅 {dates}\n"
-                f"💰 ${price} per person"
-                + (f" (target: ${target})" if target else "")
-                + f"\n🛫 {airline} · {hours}h {mins}m\n\n"
-                f"Hang tight, not there yet 🙂"
-            )
+        full_message = f"✈️ *{trip} · {dates}*\n💰 ${price} today\n\n{message}"
+        send_message(full_message)
 
-        send_message(msg)
+    save_history(history)
+
+    # Commit updated history back to repo
+    os.system('git config user.email "bot@flightbot.com"')
+    os.system('git config user.name "Flight Bot"')
+    os.system('git add price_history.json')
+    os.system('git commit -m "Update price history" || echo "No changes"')
+    os.system('git push')
 
 if __name__ == "__main__":
     main()
