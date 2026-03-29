@@ -1,0 +1,28 @@
+name: Check Flight Prices
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # runs every day at 8am UTC
+  workflow_dispatch:       # lets you run it manually too
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run price checker
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID_OLEKSANDR: ${{ secrets.TELEGRAM_CHAT_ID_OLEKSANDR }}
+          TELEGRAM_CHAT_ID_VICTORIA: ${{ secrets.TELEGRAM_CHAT_ID_VICTORIA }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+        run: python check_prices.py
